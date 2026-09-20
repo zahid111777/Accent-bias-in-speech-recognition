@@ -127,6 +127,7 @@ Accent-bias-in-speech-recognition/
 │   ├── english_us/
 │   └── english_uk/
 ├── results/                   # built by run
+│   ├── README.md              # notes on the run that produced these tables
 │   ├── transcripts.jsonl      # API cache (git-ignored)
 │   ├── results.csv
 │   ├── summary_by_accent.csv
@@ -177,12 +178,16 @@ lands in the **first** rule they match, so the groups are disjoint.
 
 ### Step 1 — a cheap test run first
 
-Transcribe three clips only, to confirm the token and the API work before
-spending credits on the whole sample:
+Transcribe a handful of clips only, to confirm the token and the API work
+before spending credits on the whole sample:
 
 ```bat
-python -m src.run --audio_dir audio --out results --limit 3
+python -m src.run --audio_dir audio --out results --limit 5
 ```
+
+Clips are queued **round-robin across accents**, not accent by accent, so a
+small `--limit` samples every group rather than only the alphabetically first
+one.
 
 ### Step 2 — the full run
 
@@ -194,6 +199,31 @@ Clips already in `results/transcripts.jsonl` are skipped, so this picks up where
 the test run stopped. Reruns after a code change cost nothing if the cache is
 intact; to re-analyse without any possibility of an API call, add
 `--skip_transcribe`.
+
+### If the run stops early
+
+Inference is metered. When an account's included credits run out, the API
+returns `402 Payment Required` and no further call can succeed, so the run
+**aborts immediately** rather than repeating the same error for every remaining
+clip. A rejected token (`401`) or an unknown model id (`404`) behaves the same
+way. Transient problems — rate limits, `503`, timeouts — are retried with
+exponential backoff instead.
+
+Every clip transcribed before the stop is already cached, and a failed clip is
+never cached, so rerunning the same command resumes and pays only for what is
+missing:
+
+```bat
+python -m src.run --audio_dir audio --out results
+```
+
+Because of the round-robin ordering, a truncated run leaves a roughly balanced
+sample across accents, and a resumed run favours the groups furthest behind.
+That matters: an accent-order queue that runs out of credit produces a complete
+first group and almost nothing for the last, which cannot support any
+comparison. Check the per-accent counts in `summary_by_accent.csv` before
+reading anything into the results, and record the state of the run in
+`results/README.md`.
 
 ### Tests
 
@@ -217,6 +247,9 @@ The suite mocks the Inference API, so it needs no token and no network.
   a specific set of numbers reproducible. Keep it if you want to re-derive the
   exact tables later. It is git-ignored because it contains full transcripts of
   the dataset's audio.
+- **Clip order is deterministic.** The round-robin queue depends only on the
+  sorted accent names and sorted filenames, so the same audio folder always
+  produces the same order and the cache stays stable across runs.
 - **Normalisation is applied to both sides** (reference and hypothesis) with the
   same function, so the comparison is symmetric.
 - Statistical choices are fixed in advance: two-sided Mann-Whitney U per pair,
