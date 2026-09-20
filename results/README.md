@@ -3,6 +3,22 @@
 The tables and figures in this folder come from an **incomplete transcription
 run** and must not be read as results of the study.
 
+## Which run produced these numbers
+
+| field | value |
+|---|---|
+| date (UTC) | 2026-09-20 |
+| backend | `hf_api` (Hugging Face Inference API, provider auto → fal-ai) |
+| model | `openai/whisper-large-v3` |
+| clips transcribed | 27 of 129 |
+| transcript cache | `results/transcripts.jsonl` (git-ignored) |
+| outcome | **incomplete** — stopped on HTTP 402, credits exhausted |
+
+`run_provenance.csv` in this folder records the same breakdown, written by the
+pipeline itself. **Always state the backend**: transcripts from `hf_api` and
+from the `local` GPU backend are not comparable and must never be pooled into
+one analysis.
+
 ## What happened
 
 The run of 2026-09-20 stopped when the Hugging Face Inference API returned
@@ -69,6 +85,16 @@ The 27 transcripts already paid for are cached in `results/transcripts.jsonl`
 ```bat
 python -m src.run --audio_dir audio --out results
 ```
+
+Or, with no credits at all, transcribe on a free GPU and keep the results in
+their own cache (see `colab/run_on_colab.ipynb`):
+
+```bash
+python -m src.run --audio_dir audio --out results --backend local --transcripts results/transcripts_local.jsonl
+```
+
+Those transcripts are a **separate** run: analyse them on their own and update
+the table at the top of this file to say so.
 
 Replace this file with a description of the completed run — date, model, and
 the final per-accent counts — once every clip has a transcript.

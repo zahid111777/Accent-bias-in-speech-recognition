@@ -10,9 +10,19 @@ content as a confound: any difference in word error rate (WER) between accent
 groups is a difference in how the model handles the speech signal, not a
 difference in what was said.
 
-Transcription runs entirely through the **Hugging Face Inference API** — no model
-is downloaded and no GPU is required. Every API response is cached, so reruns of
-the analysis cost nothing.
+Transcription has two interchangeable backends, and the analysis is identical
+either way:
+
+- **`hf_api`** (default) — the **Hugging Face Inference API**. No model
+  download, no GPU, but it is metered and a free account's credits will not
+  cover a full sample.
+- **`local`** — the same `whisper-large-v3` run through `transformers`, for a
+  free Colab or Kaggle GPU. No token, no credits. See
+  [Free GPU run](#free-gpu-run-colab--kaggle).
+
+Every transcript is cached, so reruns of the analysis cost nothing. Transcripts
+from the two backends are **not** comparable and must be kept in separate
+caches — see the warning in that section.
 
 ---
 
@@ -63,7 +73,7 @@ transcript already paid for is cached.
 | Stage | Module | Output |
 |---|---|---|
 | Select clips into accent groups | `src/prepare_data.py` | `audio/<accent>/*.mp3`, `audio/manifest.csv` |
-| Transcribe via the HF Inference API | `src/transcribe.py` | `results/transcripts.jsonl` (cache) |
+| Transcribe (`hf_api` or `local` backend) | `src/transcribe.py` | `results/transcripts*.jsonl` (cache) |
 | Normalise text | `src/normalise.py` | — |
 | Per-clip WER and error counts | `src/metrics.py` | `results/results.csv` |
 | Group statistics and tests | `src/analysis.py` | `summary_by_accent.csv`, `pairwise_tests.csv`, `hard_words.csv`, … |
@@ -170,7 +180,9 @@ Accent-bias-in-speech-recognition/
 │   └── english_uk/
 ├── results/                   # built by run
 │   ├── README.md              # notes on the run that produced these tables
-│   ├── transcripts.jsonl      # API cache (git-ignored)
+│   ├── transcripts.jsonl      # hf_api cache (git-ignored)
+│   ├── transcripts_local.jsonl # local-backend cache (git-ignored)
+│   ├── run_provenance.csv     # which backend produced the analysed rows
 │   ├── results.csv
 │   ├── summary_by_accent.csv
 │   ├── pairwise_tests.csv
@@ -180,6 +192,8 @@ Accent-bias-in-speech-recognition/
 │   ├── wrong_language_counts.csv
 │   ├── overall_summary.csv
 │   └── figures/*.png
+├── colab/
+│   └── run_on_colab.ipynb     # free GPU run
 ├── src/
 ├── tests/
 ├── .env                       # your token (git-ignored)
@@ -266,6 +280,54 @@ first group and almost nothing for the last, which cannot support any
 comparison. Check the per-accent counts in `summary_by_accent.csv` before
 reading anything into the results, and record the state of the run in
 `results/README.md`.
+
+### Free GPU run (Colab / Kaggle)
+
+The hosted API is metered, and a free account's credits do not cover 129 clips.
+The `local` backend runs the same model on a free Colab or Kaggle GPU instead,
+with **no token and no credits**.
+
+Open [`colab/run_on_colab.ipynb`](colab/run_on_colab.ipynb) in Colab (Runtime →
+Change runtime type → **GPU**). It checks the GPU, installs `torch`,
+`transformers` and `accelerate`, takes an `audio.zip` you upload, runs:
+
+```bash
+python -m src.run --audio_dir audio --out results \
+    --backend local --transcripts results/transcripts_local.jsonl
+```
+
+and zips the transcripts for download. Back on your laptop, re-derive every
+table and figure with no GPU and no API:
+
+```bat
+python -m src.run --audio_dir audio --out results ^
+  --transcripts results/transcripts_local.jsonl --skip_transcribe
+```
+
+The two backends differ only in where inference happens. Both load
+`whisper-large-v3`, neither forces a language — Whisper auto-detects, so a clip
+transcribed into the speaker's first language is still visible as the
+wrong-language failure this study measures. The local backend loads the model
+once and reuses it, uses float16 on CUDA and float32 on CPU, and processes
+audio in 30-second chunks. `torch` and `transformers` are imported lazily, so a
+machine with neither installed can still use `hf_api` and run the tests.
+
+> ### ⚠️ Never mix backends in one analysis
+>
+> A hosted provider's build of Whisper and a local one can differ in version,
+> precision and decoding. Pooling their transcripts would put those differences
+> into the WER, where they are **indistinguishable from an accent effect** —
+> the exact thing this study is trying to measure.
+>
+> Give each backend its own cache via `--transcripts`, and analyse them
+> separately. The pipeline defends this itself: every cached row records its
+> `backend`, a run warns when a cache already holds another backend's
+> transcripts, the analysis warns again if the records it scores are mixed, and
+> `results/run_provenance.csv` reports the breakdown for whatever was analysed.
+>
+> Comparing the two backends against each other is a legitimate experiment —
+> just not the same experiment as comparing accents. Run it as its own
+> analysis, over the same clips, and report it separately.
 
 ### Tests
 
