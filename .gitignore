@@ -1,0 +1,19 @@
+# Data and audio are never committed (see README: dataset terms)
+audio/
+raw_data/
+# The Kaggle download itself (archive.zip is ~900 MB)
+*.zip
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Cached API responses (can be large, contains full transcripts)
+results/transcripts.jsonl
