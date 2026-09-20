@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,24 +33,32 @@ MAX_ATTEMPTS: int = 5
 #: First backoff delay; doubles on each retry.
 INITIAL_BACKOFF_SECONDS: float = 4.0
 
-#: Substrings that mark an error as worth retrying rather than giving up on.
+#: Phrases that mark an error as transient and worth retrying.
 RETRYABLE_MARKERS: tuple[str, ...] = (
     "rate limit",
     "ratelimit",
     "too many requests",
-    "429",
-    "500",
-    "502",
-    "503",
-    "504",
     "timeout",
     "timed out",
     "temporarily unavailable",
     "currently loading",
-    "is currently loading",
+    "service unavailable",
+    "bad gateway",
     "connection",
     "overloaded",
 )
+
+#: HTTP status codes worth retrying.
+RETRYABLE_STATUS: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
+
+#: HTTP status codes that will never succeed on retry: a missing or rejected
+#: token, exhausted credits, a wrong model id. Retrying these wastes time and,
+#: for 402, can look like abuse.
+FATAL_STATUS: frozenset[int] = frozenset({400, 401, 402, 403, 404})
+
+#: Matches an HTTP status code as a standalone token, so a request id such as
+#: "Root=1-6ab01117-4e2d355e230c11fd76c31269" cannot be mistaken for one.
+_STATUS_PATTERN = re.compile(r"(?<!\w)(\d{3})(?!\w)")
 
 
 class TranscriptionError(RuntimeError):
@@ -115,14 +124,24 @@ def get_client(model: str = DEFAULT_MODEL) -> ASRClient:
     return InferenceClient(provider="auto", api_key=token)
 
 
-def discover_clips(audio_dir: Path) -> list[Clip]:
+def discover_clips(audio_dir: Path, interleave: bool = True) -> list[Clip]:
     """Collect every audio file under ``audio_dir/<accent>/``.
+
+    Clips are returned round-robin across accents by default: one from the
+    first accent, one from the second, and so on. A run that stops early —
+    exhausted API credits, a rate limit, an interrupted session — then leaves a
+    roughly balanced sample across every group instead of a complete first
+    accent and nothing for the last. With ``--limit`` it also means a cheap run
+    covers all groups rather than only the alphabetically first one.
+
+    Ordering is deterministic either way, so the cache stays stable.
 
     Args:
         audio_dir: Root folder produced by :mod:`src.prepare_data`.
+        interleave: If False, return clips grouped by accent instead.
 
     Returns:
-        Clips sorted by accent then filename, for deterministic ordering.
+        Clips in a deterministic order.
 
     Raises:
         TranscriptionError: If the folder is missing or holds no audio.
@@ -133,7 +152,7 @@ def discover_clips(audio_dir: Path) -> list[Clip]:
             f"Audio folder not found: {audio_dir}. Run 'python -m src.prepare_data' first."
         )
 
-    clips: list[Clip] = []
+    by_accent: dict[str, list[Clip]] = {}
     for accent_dir in sorted(p for p in audio_dir.iterdir() if p.is_dir()):
         files = [
             p
@@ -143,14 +162,24 @@ def discover_clips(audio_dir: Path) -> list[Clip]:
         if not files:
             LOGGER.warning("Accent folder %s contains no audio files", accent_dir.name)
             continue
-        for path in files:
-            clips.append(
-                Clip(
-                    accent=accent_dir.name,
-                    path=path,
-                    key=path.relative_to(audio_dir).as_posix(),
-                )
+        by_accent[accent_dir.name] = [
+            Clip(
+                accent=accent_dir.name,
+                path=path,
+                key=path.relative_to(audio_dir).as_posix(),
             )
+            for path in files
+        ]
+
+    clips: list[Clip] = []
+    if interleave:
+        for position in range(max((len(v) for v in by_accent.values()), default=0)):
+            for accent in by_accent:  # insertion order is the sorted accent order
+                if position < len(by_accent[accent]):
+                    clips.append(by_accent[accent][position])
+    else:
+        for accent_clips in by_accent.values():
+            clips.extend(accent_clips)
 
     if not clips:
         raise TranscriptionError(
@@ -228,9 +257,40 @@ def _extract_text(response: Any) -> str:
 
 
 def _is_retryable(error: Exception) -> bool:
-    """Decide whether an exception is transient enough to retry."""
-    message = f"{type(error).__name__}: {error}".lower()
-    return any(marker in message for marker in RETRYABLE_MARKERS)
+    """Decide whether an exception is transient enough to retry.
+
+    A status code that can never succeed on retry (a rejected token, exhausted
+    credits) wins over every other signal, so the run fails fast on those
+    instead of sleeping through five pointless attempts per clip.
+
+    Args:
+        error: The exception raised by the inference client.
+
+    Returns:
+        True if the call is worth repeating.
+    """
+    message = f"{type(error).__name__}: {error}"
+    codes = {int(match) for match in _STATUS_PATTERN.findall(message)}
+    if codes & FATAL_STATUS:
+        return False
+    if codes & RETRYABLE_STATUS:
+        return True
+    lowered = message.lower()
+    return any(marker in lowered for marker in RETRYABLE_MARKERS)
+
+
+def _fatal_status(error: Exception) -> bool:
+    """Return True for an error that will recur identically on every clip.
+
+    Args:
+        error: The exception raised by the inference client.
+
+    Returns:
+        True for a rejected token, exhausted credits or an unknown model.
+    """
+    message = f"{type(error).__name__}: {error}"
+    codes = {int(match) for match in _STATUS_PATTERN.findall(message)}
+    return bool(codes & FATAL_STATUS)
 
 
 def transcribe_clip(
@@ -327,6 +387,19 @@ def transcribe_all(
         except Exception as error:  # noqa: BLE001 - one bad clip must not stop the run
             LOGGER.error("Failed on %s: %s", clip.key, error)
             failures.append(clip.key)
+            if _fatal_status(error):
+                # An exhausted quota or a rejected token fails identically for
+                # every remaining clip. Stop now rather than logging the same
+                # error a hundred more times and burying it.
+                LOGGER.error(
+                    "Aborting after %d of %d clips: this error affects every "
+                    "remaining call, so continuing cannot help. %d clips are "
+                    "cached and will be skipped when you rerun.",
+                    position,
+                    len(pending),
+                    len(cache),
+                )
+                break
             continue
 
         if not text:
