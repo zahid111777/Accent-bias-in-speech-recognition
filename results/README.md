@@ -25,6 +25,35 @@ per-accent means, the bootstrap intervals, the Mann-Whitney tests and the
 word-level rankings carry no information about accent bias. They are committed
 only so the pipeline's output format is visible in the repository.
 
+Two specific numbers in `pairwise_tests.csv` are worth calling out so they are
+not quoted out of context. The Cliff's delta of `1.00` for pakistani vs
+english_us is forced arithmetically by comparing two observations against two,
+not evidence of a large effect. And the Pakistani mean WER currently sits
+*below* the Arabic mean, which reverses the study's hypothesis — that is an
+artifact of which clips were reached before the credits ran out, not a finding.
+
+## Sample sizes, stated plainly
+
+Even after a complete run, two groups cannot reach 30 clips, because that is
+all the Speech Accent Archive contains under these definitions:
+
+| accent | rule | available | target |
+|---|---|---|---|
+| arabic | `native_language=arabic` | 102 | 30 (capped) |
+| english_us | `country=usa & native_language=english` | 373 | 30 (capped) |
+| english_uk | `country=uk & native_language=english` | 65 | 30 (capped) |
+| **pakistani** | `country=pakistan` | **21** | 21 (all) |
+| **hindi** | `native_language=hindi` | **18** | 18 (all) |
+
+So the study is capped at **21 clips for the focus group**, against 30 for each
+capped comparison group. That is a small sample for the focus group, and the
+confidence intervals should be expected to be wide even when the run completes.
+
+The Pakistani group is also **not homogeneous in first language**: the 21
+speakers comprise urdu 12, punjabi 3, pashto 2, and one each of english,
+french, hindko and sindhi. "Pakistani" here means country of birth as recorded
+in the archive's metadata, not a single accent.
+
 ## What was fixed as a result
 
 Clip ordering is now round-robin across accents (`src/transcribe.py`), so a run

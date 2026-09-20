@@ -16,6 +16,48 @@ the analysis cost nothing.
 
 ---
 
+## Results
+
+> **Status: transcription incomplete — 27 of 129 clips.** The run of
+> 2026-09-20 stopped when the inference account's monthly credits were
+> exhausted (HTTP 402). **No finding is reported below, and none should be read
+> into the tables in `results/`.** See [`results/README.md`](results/README.md).
+
+What the pipeline has verified so far, on the clips that did transcribe:
+
+| accent | clips transcribed | of selected | mean WER | 95% CI |
+|---|---|---|---|---|
+| arabic | 11 | 30 | 0.111 | 0.013 – 0.295 |
+| english_uk | 9 | 30 | 0.034 | 0.008 – 0.064 |
+| hindi | 3 | 18 | 0.014 | 0.000 – 0.043 |
+| english_us | 2 | 30 | 0.000 | 0.000 – 0.000 |
+| **pakistani** (focus) | **2** | 21 | 0.058 | 0.029 – 0.087 |
+
+**Why no comparison is reported.** With two clips in the focus group, the
+pairwise tests are uninformative by construction: every Holm-corrected p-value
+sits between 0.88 and 0.95, and the Cliff's delta of 1.00 against `english_us`
+is forced by comparing two observations with two, not evidence of an effect.
+The partial ordering also happens to put the Pakistani mean *below* the Arabic
+mean, which is an artifact of which clips were reached before the credits ran
+out, not a result.
+
+**One real observation does survive**, because it does not depend on sample
+size: Whisper returned **1 of 27 clips in Arabic script** — a translation of
+the paragraph rather than a transcription of it. That failure mode is detected
+and reported separately from word errors throughout the pipeline.
+
+![Word error rate by accent group](results/figures/wer_by_accent.png)
+
+*Per-clip WER by accent from the partial run. Group sizes are printed under
+each box — read them before reading the boxes.*
+
+This section will carry the per-accent WERs, the Pakistani-vs-others
+comparison with effect sizes, and the wrong-language counts once a complete run
+exists. Regenerating it costs nothing beyond the missing clips, because every
+transcript already paid for is cached.
+
+---
+
 ## What the pipeline does
 
 | Stage | Module | Output |
