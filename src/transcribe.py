@@ -65,15 +65,143 @@ class TranscriptionError(RuntimeError):
     """Raised for setup problems such as a missing token or empty audio folder."""
 
 
+#: Transcription backends selectable from the command line.
+BACKENDS: tuple[str, ...] = ("hf_api", "local")
+
+#: Default backend: the hosted API, which needs no GPU and no local model.
+DEFAULT_BACKEND: str = "hf_api"
+
+
 class ASRClient(Protocol):
     """Minimal interface this module needs from an inference client.
 
     Matching :class:`huggingface_hub.InferenceClient` lets the tests substitute
-    a stub without touching the network.
+    a stub without touching the network, and lets the local GPU backend drop in
+    behind the same call.
     """
 
     def automatic_speech_recognition(self, audio: str, *, model: str) -> Any:
         """Transcribe the audio at ``audio`` with ``model``."""
+
+
+class LocalASRClient:
+    """Run Whisper locally through ``transformers``, on a GPU when one exists.
+
+    Exposes the same ``automatic_speech_recognition`` call as the hosted client
+    so the transcription loop, the cache and the whole analysis are unchanged.
+
+    ``torch`` and ``transformers`` are imported lazily, inside ``__init__``, so
+    a laptop that has neither installed can still use the ``hf_api`` backend
+    and run the test suite.
+
+    The model is loaded once, when the client is constructed, and reused for
+    every clip. Loading per clip would dominate the runtime.
+
+    Attributes:
+        model: The model id this client was built for.
+        device: ``0`` for the first CUDA device, ``-1`` for CPU.
+    """
+
+    def __init__(
+        self,
+        model: str = DEFAULT_MODEL,
+        chunk_length_s: int = 30,
+    ) -> None:
+        """Build the pipeline once.
+
+        Args:
+            model: Whisper model id to load.
+            chunk_length_s: Window used for long-form audio.
+
+        Raises:
+            TranscriptionError: If torch or transformers are not installed.
+        """
+        try:
+            import torch
+            from transformers import pipeline
+        except ImportError as error:  # pragma: no cover - environment dependent
+            raise TranscriptionError(
+                "The 'local' backend needs torch and transformers, which are "
+                "not installed. Either install them:\n"
+                "    pip install torch transformers accelerate\n"
+                "or use the hosted API instead with --backend hf_api.\n"
+                "See colab/run_on_colab.ipynb for a free GPU setup."
+            ) from error
+
+        self.model = model
+        cuda = torch.cuda.is_available()
+        self.device = 0 if cuda else -1
+        dtype = torch.float16 if cuda else torch.float32
+
+        if cuda:
+            LOGGER.info(
+                "Loading %s on GPU (%s), float16", model, torch.cuda.get_device_name(0)
+            )
+        else:
+            LOGGER.warning(
+                "No CUDA device found: loading %s on CPU in float32. This works "
+                "but is slow for a full sample; see colab/run_on_colab.ipynb.",
+                model,
+            )
+
+        self._pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model,
+            device=self.device,
+            torch_dtype=dtype,
+            chunk_length_s=chunk_length_s,
+        )
+        LOGGER.info("Model loaded once and reused for every clip")
+
+    def automatic_speech_recognition(self, audio: str, *, model: str) -> dict[str, Any]:
+        """Transcribe one audio file.
+
+        No language is forced: Whisper auto-detects, exactly as the hosted API
+        does. That matters here, because a clip transcribed into the speaker's
+        first language instead of English is one of the failure modes this
+        study measures, and forcing ``language="en"`` would hide it.
+
+        Args:
+            audio: Path to the audio file.
+            model: Ignored; the pipeline is already bound to a model. Present
+                so this class satisfies :class:`ASRClient`.
+
+        Returns:
+            A dict with a ``text`` key, matching the hosted client's shape.
+        """
+        if model and model != self.model:
+            LOGGER.debug(
+                "Ignoring per-call model %r; this client is loaded with %r",
+                model,
+                self.model,
+            )
+        return self._pipe(str(audio), generate_kwargs={"task": "transcribe"})
+
+
+def get_backend_client(
+    backend: str = DEFAULT_BACKEND,
+    model: str = DEFAULT_MODEL,
+) -> ASRClient:
+    """Build the client for the requested backend.
+
+    Args:
+        backend: Either ``hf_api`` (hosted, metered) or ``local`` (GPU/CPU).
+        model: Model id.
+
+    Returns:
+        A client satisfying :class:`ASRClient`.
+
+    Raises:
+        TranscriptionError: For an unknown backend, a missing token, or missing
+            local dependencies.
+    """
+    if backend == "hf_api":
+        return get_client(model)
+    if backend == "local":
+        return LocalASRClient(model)
+    raise TranscriptionError(
+        f"Unknown backend {backend!r}. Choose one of: {', '.join(BACKENDS)}."
+    )
 
 
 @dataclass(frozen=True)
@@ -339,6 +467,21 @@ def transcribe_clip(
     raise RuntimeError("unreachable: retry loop exited without returning")
 
 
+def resolve_transcripts_path(out_dir: Path, transcripts: Path | None = None) -> Path:
+    """Decide where the transcript cache lives.
+
+    Args:
+        out_dir: Results folder.
+        transcripts: Explicit path, or ``None`` for ``out_dir/transcripts.jsonl``.
+
+    Returns:
+        The cache path.
+    """
+    if transcripts is not None:
+        return Path(transcripts)
+    return Path(out_dir) / "transcripts.jsonl"
+
+
 def transcribe_all(
     audio_dir: Path,
     out_dir: Path,
@@ -347,26 +490,32 @@ def transcribe_all(
     limit: int | None = None,
     call_interval: float = CALL_INTERVAL_SECONDS,
     sleeper: Any = time.sleep,
+    backend: str = DEFAULT_BACKEND,
+    transcripts: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Transcribe every clip under ``audio_dir``, caching as it goes.
 
     Args:
         audio_dir: Root folder of ``<accent>/<clip>`` audio.
-        out_dir: Results folder; the cache lives at ``out_dir/transcripts.jsonl``.
-        client: Client to use; built from ``HF_TOKEN`` when ``None``.
-        model: Model id passed to the API.
+        out_dir: Results folder; the default cache is ``out_dir/transcripts.jsonl``.
+        client: Client to use; built from ``backend`` when ``None``.
+        model: Model id.
         limit: Transcribe at most this many *new* clips (cheap test runs).
-        call_interval: Seconds to sleep between successive API calls.
+        call_interval: Seconds to sleep between successive calls.
         sleeper: Injection point for sleeping, so tests run instantly.
+        backend: ``hf_api`` or ``local``; selects the client when none is given.
+        transcripts: Explicit cache path, so a local-backend run can write to a
+            separate file rather than mixing backends in one cache.
 
     Returns:
         All records for the discovered clips, cached and freshly fetched alike.
     """
     audio_dir, out_dir = Path(audio_dir), Path(out_dir)
-    cache_path = out_dir / "transcripts.jsonl"
+    cache_path = resolve_transcripts_path(out_dir, transcripts)
 
     clips = discover_clips(audio_dir)
     cache = load_cache(cache_path)
+    _warn_on_mixed_backends(cache, backend, cache_path)
 
     pending = [clip for clip in clips if clip.key not in cache]
     skipped = len(clips) - len(pending)
@@ -377,7 +526,7 @@ def transcribe_all(
         pending = pending[:limit]
 
     if pending and client is None:
-        client = get_client(model)
+        client = get_backend_client(backend, model)
 
     failures: list[str] = []
     for position, clip in enumerate(pending, start=1):
@@ -410,6 +559,7 @@ def transcribe_all(
             "file": clip.path.as_posix(),
             "text": text,
             "model": model,
+            "backend": backend,
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         _append_record(cache_path, record)
@@ -435,18 +585,73 @@ def transcribe_all(
     return records
 
 
-def records_for_clips(audio_dir: Path, out_dir: Path) -> list[dict[str, Any]]:
+def describe_backends(records: Iterable[dict[str, Any]]) -> dict[str, int]:
+    """Count how many records came from each backend.
+
+    Args:
+        records: Cached transcription records.
+
+    Returns:
+        Mapping of backend name -> record count. Records written before the
+        backend field existed count as ``hf_api``, which is what produced them.
+    """
+    counts: dict[str, int] = {}
+    for record in records:
+        name = str(record.get("backend") or "hf_api")
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _warn_on_mixed_backends(
+    cache: dict[str, dict[str, Any]],
+    backend: str,
+    cache_path: Path,
+) -> None:
+    """Warn loudly when a cache is about to hold more than one backend.
+
+    Two backends are two different systems: a hosted provider's build of
+    Whisper and a local one can differ in version, precision and decoding. WERs
+    from a mix of the two are not comparable, and the difference would be
+    silently attributed to accent.
+
+    Args:
+        cache: Records already in the cache.
+        backend: The backend about to be used.
+        cache_path: Cache location, named in the warning.
+    """
+    existing = describe_backends(cache.values())
+    others = {name: count for name, count in existing.items() if name != backend}
+    if others:
+        summary = ", ".join(f"{count} from {name}" for name, count in sorted(others.items()))
+        LOGGER.warning(
+            "Cache %s already holds transcripts from another backend (%s) and "
+            "you are now running %r. Mixing backends in one analysis is not "
+            "valid: differences between them would be indistinguishable from "
+            "accent effects. Use --transcripts to keep each backend in its own "
+            "file, e.g. results/transcripts_local.jsonl.",
+            cache_path,
+            summary,
+            backend,
+        )
+
+
+def records_for_clips(
+    audio_dir: Path,
+    out_dir: Path,
+    transcripts: Path | None = None,
+) -> list[dict[str, Any]]:
     """Return cached records for the clips currently under ``audio_dir``.
 
     Args:
         audio_dir: Root folder of ``<accent>/<clip>`` audio.
-        out_dir: Results folder holding ``transcripts.jsonl``.
+        out_dir: Results folder holding the default cache.
+        transcripts: Explicit cache path, overriding the default.
 
     Returns:
         One record per clip that has a cached transcript.
     """
     clips = discover_clips(Path(audio_dir))
-    cache = load_cache(Path(out_dir) / "transcripts.jsonl")
+    cache = load_cache(resolve_transcripts_path(out_dir, transcripts))
     return [cache[clip.key] for clip in clips if clip.key in cache]
 
 

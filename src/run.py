@@ -30,7 +30,14 @@ from .analysis import (
 from .config import DEFAULT_MODEL, FOCUS_ACCENT, SEED, load_reference, setup_logging
 from .metrics import score_records, summarise_two_ways
 from .plots import make_all_figures
-from .transcribe import TranscriptionError, records_for_clips, transcribe_all
+from .transcribe import (
+    BACKENDS,
+    DEFAULT_BACKEND,
+    TranscriptionError,
+    describe_backends,
+    records_for_clips,
+    transcribe_all,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,6 +57,8 @@ def run_pipeline(
     focus: str = FOCUS_ACCENT,
     seed: int = SEED,
     skip_transcribe: bool = False,
+    backend: str = DEFAULT_BACKEND,
+    transcripts: Path | None = None,
     client: object | None = None,
     sleeper: object | None = None,
     reference_path: Path | None = None,
@@ -64,6 +73,9 @@ def run_pipeline(
         focus: Accent group compared against all others.
         seed: Seed for the bootstrap and the plot jitter.
         skip_transcribe: Re-use the cache and make no API calls.
+        backend: ``hf_api`` (hosted) or ``local`` (GPU/CPU via transformers).
+        transcripts: Explicit transcript cache path. Every downstream table
+            and figure is built from whichever cache is named here.
         client: Optional ASR client; used by the mocked dry run and the tests.
         sleeper: Optional sleep function; used to make tests instant.
         reference_path: Optional override for ``reference.txt``.
@@ -80,7 +92,7 @@ def run_pipeline(
 
     if skip_transcribe:
         LOGGER.info("--skip_transcribe: using cached transcripts only")
-        records = records_for_clips(audio_dir, out_dir)
+        records = records_for_clips(audio_dir, out_dir, transcripts=transcripts)
     else:
         kwargs = {} if sleeper is None else {"sleeper": sleeper}
         records = transcribe_all(
@@ -89,6 +101,8 @@ def run_pipeline(
             client=client,
             model=model,
             limit=limit,
+            backend=backend,
+            transcripts=transcripts,
             **kwargs,
         )
 
@@ -96,6 +110,19 @@ def run_pipeline(
         raise TranscriptionError(
             "No transcripts available to analyse. Run without --skip_transcribe, "
             "and check the log for failed clips."
+        )
+
+    provenance = describe_backends(records)
+    LOGGER.info(
+        "Analysing %d transcripts produced by: %s",
+        len(records),
+        ", ".join(f"{count} x {name}" for name, count in sorted(provenance.items())),
+    )
+    if len(provenance) > 1:
+        LOGGER.warning(
+            "These transcripts come from more than one backend. WERs from "
+            "different backends are not comparable, so this analysis is not "
+            "valid as a between-accent comparison."
         )
 
     results = pd.DataFrame(score_records(records, reference))
@@ -126,6 +153,13 @@ def run_pipeline(
     _write_csv(wrong_language, out_dir / "wrong_language_counts.csv", "wrong-language counts")
     _write_csv(
         pd.DataFrame([overall]), out_dir / "overall_summary.csv", "overall summary"
+    )
+    _write_csv(
+        pd.DataFrame(
+            [{"backend": name, "n_clips": count} for name, count in sorted(provenance.items())]
+        ),
+        out_dir / "run_provenance.csv",
+        "run provenance",
     )
 
     figures = make_all_figures(
@@ -171,6 +205,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Analyse the cached transcripts without calling the API",
     )
+    parser.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default=DEFAULT_BACKEND,
+        help=(
+            "hf_api: hosted Inference API, needs HF_TOKEN and credits. "
+            "local: run Whisper here with transformers, needs torch and a GPU "
+            "to be practical (see colab/run_on_colab.ipynb)."
+        ),
+    )
+    parser.add_argument(
+        "--transcripts",
+        type=Path,
+        default=None,
+        help=(
+            "Transcript cache to read and write (default: <out>/transcripts.jsonl). "
+            "Give each backend its own file, e.g. results/transcripts_local.jsonl; "
+            "all tables and figures are built from whichever file is named here."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     return parser
 
@@ -192,6 +246,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             focus=args.focus,
             seed=args.seed,
             skip_transcribe=args.skip_transcribe,
+            backend=args.backend,
+            transcripts=args.transcripts,
         )
     except (TranscriptionError, FileNotFoundError, ValueError) as exc:
         LOGGER.error("%s", exc)
