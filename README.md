@@ -28,43 +28,39 @@ caches — see the warning in that section.
 
 ## Results
 
-> **Status: transcription incomplete — 27 of 129 clips.** The run of
-> 2026-09-20 stopped when the inference account's monthly credits were
-> exhausted (HTTP 402). **No finding is reported below, and none should be read
-> into the tables in `results/`.** See [`results/README.md`](results/README.md).
+Full run: 129 clips across 5 accent groups, transcribed with `whisper-large-v3`
+on a local GPU backend (see [Reproducibility notes](#reproducibility-notes)).
 
-What the pipeline has verified so far, on the clips that did transcribe:
-
-| accent | clips transcribed | of selected | mean WER | 95% CI |
+| accent | n | mean WER | 95% CI | n wrong-language |
 |---|---|---|---|---|
-| arabic | 11 | 30 | 0.111 | 0.013 – 0.295 |
-| english_uk | 9 | 30 | 0.034 | 0.008 – 0.064 |
-| hindi | 3 | 18 | 0.014 | 0.000 – 0.043 |
-| english_us | 2 | 30 | 0.000 | 0.000 – 0.000 |
-| **pakistani** (focus) | **2** | 21 | 0.058 | 0.029 – 0.087 |
+| hindi | 18 | 0.011 | 0.003 – 0.020 | 0 |
+| english_us | 30 | 0.013 | 0.002 – 0.029 | 0 |
+| **pakistani** (focus) | **21** | **0.071** | 0.017 – 0.169 | 1 |
+| english_uk | 30 | 0.138 | 0.020 – 0.337 | 0 |
+| arabic | 30 | 0.252 | 0.086 – 0.483 | 4 |
 
-**Why no comparison is reported.** With two clips in the focus group, the
-pairwise tests are uninformative by construction: every Holm-corrected p-value
-sits between 0.88 and 0.95, and the Cliff's delta of 1.00 against `english_us`
-is forced by comparing two observations with two, not evidence of an effect.
-The partial ordering also happens to put the Pakistani mean *below* the Arabic
-mean, which is an artifact of which clips were reached before the credits ran
-out, not a result.
+**Pakistani-accented English has significantly higher WER than US English**
+(Mann-Whitney U, Holm-corrected p = 0.018; Cliff's delta = 0.42, medium
+effect). Against Hindi, Arabic and UK English the gap is not statistically
+significant at this sample size (Holm-corrected p ≥ 0.17); the Hindi
+comparison (raw p = 0.056) is the closest to significance and would be worth
+revisiting with a larger sample.
 
-**One real observation does survive**, because it does not depend on sample
-size: Whisper returned **1 of 27 clips in Arabic script** — a translation of
-the paragraph rather than a transcription of it. That failure mode is detected
-and reported separately from word errors throughout the pipeline.
+**Wrong-language output is a distinct, non-noisy finding.** 1 of 21 Pakistani
+clips (4.8%) and 4 of 30 Arabic clips (13.3%) were returned in Arabic script
+rather than transcribed into English — a different failure mode from ordinary
+misrecognition, and one that does not depend on the WER comparisons above. No
+clip in any other group showed this behaviour.
+
+**Arabic's own numbers are unstable and should not be over-read.** Its mean
+WER (0.252) and variance are inflated by the four wrong-language clips, which
+score near 1.0; the "clean" WER excluding them (0.070) is close to the
+Pakistani group's raw mean. This is a caveat about Arabic as a comparison
+group, not a claim about Pakistani accents.
 
 ![Word error rate by accent group](results/figures/wer_by_accent.png)
 
-*Per-clip WER by accent from the partial run. Group sizes are printed under
-each box — read them before reading the boxes.*
-
-This section will carry the per-accent WERs, the Pakistani-vs-others
-comparison with effect sizes, and the wrong-language counts once a complete run
-exists. Regenerating it costs nothing beyond the missing clips, because every
-transcript already paid for is cached.
+*Per-clip WER by accent. Group sizes are printed under each box.*
 
 ---
 
@@ -341,6 +337,10 @@ The suite mocks the Inference API, so it needs no token and no network.
 
 ## Reproducibility notes
 
+- **The reported run used the `local` backend** — `whisper-large-v3` through
+  `transformers` on a Colab GPU, 129 of 129 clips, cached in
+  `results/transcripts_local.jsonl`. `results/run_provenance.csv` records this,
+  written by the pipeline itself, and confirms no `hf_api` rows were pooled in.
 - **One seed** (`SEED = 12345` in `src/config.py`) drives the per-group
   subsample, the 10,000-resample bootstrap, and the jitter in the boxplot.
   Re-running `prepare_data` with the same CSV, the same rules and the same seed
@@ -376,9 +376,9 @@ Read carefully before generalising anything from this study.
 - **Small samples.** Tens of clips per accent at most. Rank tests and bootstrap
   intervals are used precisely because the samples are small, but small samples
   still mean wide intervals and limited power.
-- **A single model, at one point in time.** `whisper-large-v3` via a hosted API.
-  Results may not transfer to other models, other sizes, or to the same model
-  later.
+- **A single model, at one point in time.** One `whisper-large-v3` checkpoint,
+  run locally through `transformers`. Results may not transfer to other models,
+  other sizes, to a hosted build of the same model, or to the same model later.
 - **Accent groups are proxies.** A group is defined by country of birth or
   self-reported native language in the metadata, not by any phonetic assessment.
   "Pakistani" is a passport-and-L1 label covering Urdu, Punjabi, Pashto, Sindhi
